@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sse-starlette
+pydantic-settings
+httpx
+asyncpg
+cohere

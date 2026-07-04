@@ -1,0 +1,16 @@
+[Unit]
+Description=ChatLAYA Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/innovaplus/KORYXA/services/chatlaya-service/backend
+EnvironmentFile=/etc/innovaplus/chatlaya-service.env
+ExecStart=/usr/bin/env uvicorn app.main:app --host 127.0.0.1 --port 8010
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/koryxa/chatlaya-service.log
+StandardError=append:/var/log/koryxa/chatlaya-service-error.log
+
+[Install]
+WantedBy=multi-user.target

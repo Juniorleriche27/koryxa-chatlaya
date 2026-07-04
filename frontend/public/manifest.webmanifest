@@ -1,0 +1,13 @@
+{
+  "name": "KORYXA",
+  "short_name": "KORYXA",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0ea5e9",
+  "description": "Moteur IA d’opportunités. Transparence · Équité · Impact.",
+  "icons": [
+    { "src": "/favicon.ico", "sizes": "48x48 64x64 96x96 128x128", "type": "image/x-icon" }
+  ]
+}
+

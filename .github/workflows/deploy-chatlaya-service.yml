@@ -1,0 +1,121 @@
+name: Deploy ChatLAYA service to Hetzner
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/chatlaya-service/backend/**'
+      - 'infra/systemd/chatlaya.service'
+      - '.github/workflows/deploy-chatlaya-service.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    env:
+      SERVICE_NAME: chatlaya.service
+      RSYNC_SOURCE: services/chatlaya-service/backend/
+      REMOTE_ROOT: /opt/innovaplus/KORYXA/services/chatlaya-service/backend
+      REMOTE_VENV: /opt/innovaplus/KORYXA/services/chatlaya-service/backend/.venv
+      REQUIREMENTS_FILE: /opt/innovaplus/KORYXA/services/chatlaya-service/backend/requirements.txt
+      HEALTHCHECK_URL: http://127.0.0.1:8012/health
+      HEALTHCHECK_INTERVAL: "5"
+      HEALTHCHECK_TIMEOUT: "180"
+      SSH_OPTS: "-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write SSH key
+        run: |
+          install -m 600 -D /dev/stdin ~/.ssh/id_ed25519 <<'KEY'
+          ${{ secrets.HETZNER_SSH_KEY }}
+          KEY
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Ensure remote path exists
+        run: |
+          ssh ${{ env.SSH_OPTS }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "mkdir -p '${{ env.REMOTE_ROOT }}'"
+
+      - name: Push ChatLAYA service code to server
+        run: |
+          rsync -az --delete \
+            -e "ssh ${{ env.SSH_OPTS }}" \
+            --filter='P .venv/' \
+            --filter='P .env' \
+            --filter='P .env.local' \
+            --exclude='__pycache__/' \
+            ${{ env.RSYNC_SOURCE }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_ROOT }}/
+
+      - name: Install/Update Python deps in remote venv
+        run: |
+          ssh ${{ env.SSH_OPTS }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            <<'EOF'
+          set -euo pipefail
+          REMOTE_VENV="${{ env.REMOTE_VENV }}"
+          REQUIREMENTS_FILE="${{ env.REQUIREMENTS_FILE }}"
+          if [ ! -x "${REMOTE_VENV}/bin/python" ]; then
+            python3 -m venv "${REMOTE_VENV}"
+          fi
+          "${REMOTE_VENV}/bin/python" -m pip install -U pip wheel
+          "${REMOTE_VENV}/bin/pip" install -r "${REQUIREMENTS_FILE}" --no-cache-dir
+          EOF
+
+      - name: Restart ChatLAYA service
+        run: |
+          ssh ${{ env.SSH_OPTS }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            <<'EOF'
+          set -euo pipefail
+          SERVICE_NAME="${{ env.SERVICE_NAME }}"
+          sudo systemctl daemon-reload
+          sudo systemctl restart "${SERVICE_NAME}"
+          sudo systemctl is-active --quiet "${SERVICE_NAME}"
+          sudo systemctl status "${SERVICE_NAME}" --no-pager
+          EOF
+
+      - name: Validate ChatLAYA health endpoint
+        run: |
+          set -euo pipefail
+          HEALTH_URL="${{ env.HEALTHCHECK_URL }}"
+          INTERVAL=${{ env.HEALTHCHECK_INTERVAL }}
+          TIMEOUT=${{ env.HEALTHCHECK_TIMEOUT }}
+          if ! command -v jq >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+          deadline=$((SECONDS + TIMEOUT))
+          attempt=1
+          last_response=""
+          while [ $SECONDS -lt $deadline ]; do
+            echo "Health attempt ${attempt}..."
+            response=$(ssh ${{ env.SSH_OPTS }} \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "curl -fsS --max-time 10 '${HEALTH_URL}'" || true)
+            last_response="${response}"
+            status=$(printf '%s' "${response}" | jq -r '.status // empty' 2>/dev/null || true)
+            service=$(printf '%s' "${response}" | jq -r '.service // empty' 2>/dev/null || true)
+            if [ "${status}" = "ok" ] && [ "${service}" = "chatlaya-service" ]; then
+              echo "ChatLAYA health check succeeded on attempt ${attempt}."
+              exit 0
+            fi
+            sleep "${INTERVAL}"
+            attempt=$((attempt + 1))
+          done
+
+          echo "::error::ChatLAYA health endpoint did not report expected payload within timeout."
+          echo "Last response from ${HEALTH_URL}:"
+          printf '%s\n' "${last_response}"
+
+          echo "::group::Recent ChatLAYA service logs"
+          ssh ${{ env.SSH_OPTS }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "sudo journalctl -u '${{ env.SERVICE_NAME }}' -n 200 --no-pager || true"
+          echo "::endgroup::"
+          exit 1
